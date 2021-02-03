@@ -21,6 +21,7 @@ from gen_config import *
 import scipy.stats
 import time
 import warnings
+import pdb
 
 model_major_version = 0
 model_sub_version = 4
@@ -32,6 +33,9 @@ model_reversion = 3
 #define NNOM_VERSION          (NNOM_MAJORVERSION * 10000) + (NNOM_SUBVERSION * 100) + NNOM_REVISION)
 
 def fuse_bn_to_conv(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     # try to fuse BN layer to convolutional
     if ('conv' in layer.name) and \
             ('batch_normalization' in layer.outbound_nodes[0].outbound_layer.name):
@@ -86,7 +90,7 @@ def fuse_bn_to_conv(layer):
         print('fused bias max', c_b.max(), 'min', c_b.min())
         # write the weights back to the layer
         # after that, the model will be destroyed.. need a better way to pass the new weight
-        layer.set_weights([c_w, c_b])
+        actual_layer.set_weights([c_w, c_b])
 
 def generate_test_bin(x, y, name='test_data_with_label.bin'):
     '''
@@ -593,6 +597,10 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
     f.write('/* Weights, bias and Q format */\n')
     f.close()
     for curr_idx, layer in  enumerate(model.layers):
+        actual_layer = layer
+        if isinstance(layer, tf.keras.layers.Wrapper):
+            actual_layer = layer.layer
+
         if (not layer.weights):
             continue
         # before merging bn layer, check if the bn is "legally" after Conv
@@ -611,15 +619,16 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
         for idx, var in enumerate(layer_weights):
             var_name = convert_tensor_name(layer.weights[idx])
             var_values = var
-            if("kernel" not in var_name and 'bias' not in var_name): # ignore batchnormalisation's parameters
+            if(("kernel" not in var_name and 'bias' not in var_name) or # ignore batchnormalisation's parameters
+               ('kernel_min' in var_name or 'kernel_max' in var_name)): # ignore QuantizeWrapper parameters
                 continue
 
-            if (per_channel_quant and type(layer) in [Conv2D, Conv1D, DepthwiseConv2D, Conv2DTranspose]):
-                if(type(layer) in [DepthwiseConv2D] and "kernel" in var_name): #depthwise kernel quantised by
+            if (per_channel_quant and type(actual_layer) in [Conv2D, Conv1D, DepthwiseConv2D, Conv2DTranspose]):
+                if(type(actual_layer) in [DepthwiseConv2D] and "kernel" in var_name): #depthwise kernel quantised by
                     shape = var_values.shape[:2] + (-1,) # need to combine the mult and channel first
                     var = var_values.reshape(shape)
                     dec_bits = find_dec_bits_max_min_axis(var, axis=-1, bit_width=8)
-                elif(type(layer) in [Conv2DTranspose]):
+                elif(type(actual_layer) in [Conv2DTranspose]):
                     dec_bits = find_dec_bits_max_min_axis(var_values, axis=-2, bit_width=8)
                 else:
                     dec_bits = find_dec_bits_max_min_axis(var_values, bit_width=8)
@@ -628,7 +637,7 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
             print('   ', var_name, "dec bit", dec_bits)
 
             # kernel dec, bias dec, bias shift, output shift
-            if(is_shift_layer(layer) and not is_rnn_layer(layer)):
+            if(is_shift_layer(actual_layer) and not is_rnn_layer(actual_layer)):
                 inp = layer.input.name.replace(':','/').split('/')[0]
                 layer_input_dec = layer_q_list[inp][0]
                 layer_output_dec = layer_q_list[layer.name][0]
@@ -653,7 +662,7 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
                             dec_bits = weight_dec_shift
                             bias_shift = 0
             # RNN layer's kernel dec, bias dec, bias shift, output shift
-            if(is_rnn_layer(layer)):
+            if(is_rnn_layer(actual_layer)):
                 inp = layer.input.name.replace(':','/').split('/')[0]
                 layer_input_dec = layer_q_list[inp][0]
                 layer_output_dec = layer_q_list[layer.name][0]
@@ -668,13 +677,13 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
                         bias_shift = 0
 
             # now quantise them
-            if(type(layer) in [Conv2D, Conv1D, DepthwiseConv2D, Conv2DTranspose]):
-                if(type(layer) in [DepthwiseConv2D] and "kernel" in var_name):
+            if(type(actual_layer) in [Conv2D, Conv1D, DepthwiseConv2D, Conv2DTranspose]):
+                if(type(actual_layer) in [DepthwiseConv2D] and "kernel" in var_name):
                     old_shape = var_values.shape
                     var_values = quantize_data(var_values.reshape(var_values.shape[:2] + (-1,)),
                                    dec_bits, axis=-1, per_axis=per_channel_quant) # convert to [h, w, out x mult]
                     var_values = var_values.reshape(old_shape) # convert the shape back to  [h, w, out, mult]
-                elif(type(layer) in [Conv2DTranspose] and "kernel" in var_name):
+                elif(type(actual_layer) in [Conv2DTranspose] and "kernel" in var_name):
                     var_values = quantize_data(var_values, dec_bits, axis=-2, per_axis=per_channel_quant) # [h, w, out, in]
                 else:
                     var_values = quantize_data(var_values, dec_bits, per_axis=per_channel_quant) # [h, w, in, out]
@@ -683,12 +692,12 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
 
             # CHW format
             if ('chw' in format):
-                if (is_lstm_layer(layer) or is_gru_layer(layer)):   # currently we use 16 bit intermediate， use reorder optimation
+                if (is_lstm_layer(actual_layer) or is_gru_layer(actual_layer)):   # currently we use 16 bit intermediate， use reorder optimation
                     transposed_wts = np.transpose(var_values)
                     if('kernel' in var_name):
                         transposed_wts = convert_q7_q15_weights(np.reshape(transposed_wts ,(transposed_wts.shape[0], transposed_wts.shape[1], 1, 1)))
                 # dense and rnn still working under HWC format
-                elif ("dense" in var_name or is_rnn_layer(layer)) and "kernel" in var_name:
+                elif ("dense" in var_name or is_rnn_layer(actual_layer)) and "kernel" in var_name:
                     transposed_wts = np.transpose(var_values)
                     transposed_wts = convert_to_x4_q7_weights(np.reshape(transposed_wts, (transposed_wts.shape[0], transposed_wts.shape[1], 1, 1)))
                 # all other kernels, bias stay the same
@@ -699,13 +708,13 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
                 if (len(var_values.shape) == 3):  # 1D convolution layer weights
                     transposed_wts = np.transpose(var_values, (2, 0, 1))
                 elif (len(var_values.shape) == 4):  # 2D convolution layer weights
-                    if(type(layer) == Conv2DTranspose): # test
+                    if(type(actual_layer) == Conv2DTranspose): # test
                         transposed_wts = np.transpose(var_values, (2, 0, 1, 3))
-                    elif type(layer) == DepthwiseConv2D:
+                    elif type(actual_layer) == DepthwiseConv2D:
                         transposed_wts = var_values#np.transpose(var_values, (0, 1, 3, 2)) # [h, w, out, mult] test for multiplier
                     else:
                         transposed_wts = np.transpose(var_values, (3, 0, 1, 2))
-                elif(is_lstm_layer(layer) or is_gru_layer(layer)):   # currently we use 16 bit intermediate, use reorder optimation
+                elif(is_lstm_layer(actual_layer) or is_gru_layer(actual_layer)):   # currently we use 16 bit intermediate, use reorder optimation
                     if('kernel' in var_name):
                         transposed_wts = np.transpose(var_values)
                         transposed_wts = convert_q7_q15_weights(np.reshape(transposed_wts ,(transposed_wts.shape[0], transposed_wts.shape[1], 1, 1)))
@@ -714,7 +723,7 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
                 else:  # fully connected layer weights or biases of any layer
                     # test, use opt weight reorder
                     transposed_wts = np.transpose(var_values)
-                    if ("dense" in var_name or is_rnn_layer(layer)) and "kernel" in var_name: # and other RNN layers
+                    if ("dense" in var_name or is_rnn_layer(actual_layer)) and "kernel" in var_name: # and other RNN layers
                         transposed_wts = convert_to_x4_q7_weights(np.reshape(transposed_wts ,(transposed_wts.shape[0], transposed_wts.shape[1], 1, 1)))
 
             with open(name, 'a') as f:
@@ -765,7 +774,10 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
 
         # generate output shift for the layers without weights (weighted layers were generated in quantize_weights)
         for layer in model.layers:
-            if (is_shift_layer(layer)):
+            actual_layer = layer
+            if isinstance(layer, tf.keras.layers.Wrapper):
+                actual_layer = layer.layer
+            if (is_shift_layer(actual_layer)):
                 iname = layer.name.upper()
                 # add, sub
                 if ('add' in layer.name or 'subtract' in layer.name):
@@ -794,7 +806,8 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
             if ('lambda' in layer.name or
                 'dropout' in layer.name or
                 'gaussian_noise' in layer.name or
-                'batch_normalization' in layer.name
+                'batch_normalization' in layer.name or
+                'quantize' in layer.name
                 #or ('flatten' in layer.name and 'chw' not in format)
                 ): # flatten layer can be skipped in HWC but needed in CHW
                 return True
@@ -802,6 +815,9 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
 
         output_num = 0
         for id, layer in enumerate(L):
+            actual_layer = layer
+            if isinstance(layer, tf.keras.layers.Wrapper):
+                actual_layer = layer.layer
             if (is_skipable_layer(layer)):
                 inp = layer.input.name.replace(':', '/').split('/')[0]
                 LI[layer.name] = (LI[inp][0], layer)
@@ -819,8 +835,8 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
                 fp.write(gen_tensor(w, dec_bits=dec_bits_name, tensor_value=var_cname, per_axis=per_axis))
 
             # output the config of all layer
-            if (type(layer) in [InputLayer] or 'input' in layer.name):
-                if(type(layer) == tf.Tensor):
+            if (type(actual_layer) in [InputLayer] or 'input' in layer.name):
+                if(type(actual_layer) == tf.Tensor):
                     raise  Exception('Not yet support tensor as input/or Sequential model. '
                                      'please use Input layer as your first layer in the model', layer.name, layer)
                 size = 1
@@ -829,48 +845,51 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
                 fp.write(gen_values('nnom_input_data', '{0}', size=str(size), dtype='static int8_t'))
                 fp.write(gen_tensor(layer.input, layer_q_list[layer.name][0], tensor_value='nnom_input_data', is_io_tensor=True))
                 fp.write(gen_io_config(layer, tensor_name=convert_tensor_name(layer.input)))
-            elif (type(layer) in [Conv2D, Conv1D, DepthwiseConv2D]):
+            elif (type(actual_layer) in [Conv2D, Conv1D, DepthwiseConv2D]):
                 for w in layer.weights:
-                    gen_weight_tensor(w, per_axis=per_channel_quant)
+                    if ('kernel:' in w.name or 'bias:' in w.name):
+                        gen_weight_tensor(w, per_axis=per_channel_quant)
                 fp.write(gen_conv2d_config(layer, layer.name.upper() +'_OUTPUT_RSHIFT', layer.name.upper() +'_BIAS_LSHIFT'))
-            elif (type(layer) in [Conv2DTranspose]):
+            elif (type(actual_layer) in [Conv2DTranspose]):
                 for w in layer.weights:
-                    gen_weight_tensor(w, per_axis=per_channel_quant)
+                    if ('kernel:' in w.name or 'bias:' in w.name):
+                        gen_weight_tensor(w, per_axis=per_channel_quant)
                 fp.write(gen_conv2d_trans_config(layer, layer.name.upper() +'_OUTPUT_RSHIFT', layer.name.upper() +'_BIAS_LSHIFT'))
-            elif (type(layer) in [Dense]):
+            elif (type(actual_layer) in [Dense]):
                 for w in layer.weights:
-                    gen_weight_tensor(w, per_axis=False)
+                    if ('kernel:' in w.name or 'bias:' in w.name):
+                        gen_weight_tensor(w, per_axis=False)
                 fp.write(gen_dense_config(layer, layer.name.upper() +'_OUTPUT_RSHIFT', layer.name.upper() +'_BIAS_LSHIFT'))
-            elif (type(layer) in [MaxPooling2D, AveragePooling2D, MaxPooling1D, AveragePooling1D]):
+            elif (type(actual_layer) in [MaxPooling2D, AveragePooling2D, MaxPooling1D, AveragePooling1D]):
                 fp.write(gen_pooling_config(layer))
-            elif (type(layer) in [GlobalMaxPooling2D, GlobalAveragePooling2D, GlobalMaxPooling1D, GlobalAveragePooling1D]):
+            elif (type(actual_layer) in [GlobalMaxPooling2D, GlobalAveragePooling2D, GlobalMaxPooling1D, GlobalAveragePooling1D]):
                 fp.write(gen_gl_pooling_config(layer))
-            elif (type(layer) in [Multiply, Add, Subtract]):
+            elif (type(actual_layer) in [Multiply, Add, Subtract]):
                 fp.write(gen_matrix_config(layer, output_shift_name=layer.name.upper()+'_OUTPUT_RSHIFT'))
-            elif (type(layer) in [ZeroPadding2D, ZeroPadding1D]):
+            elif (type(actual_layer) in [ZeroPadding2D, ZeroPadding1D]):
                 fp.write(gen_zero_padding_config(layer))
-            elif (type(layer) in [Cropping2D, Cropping1D]):
+            elif (type(actual_layer) in [Cropping2D, Cropping1D]):
                 fp.write(gen_cropping_config(layer))
-            elif (type(layer) in [Softmax]):
+            elif (type(actual_layer) in [Softmax]):
                 fp.write(gen_softmax_config(layer))
-            elif (type(layer) in [Flatten]):
+            elif (type(actual_layer) in [Flatten]):
                 fp.write(gen_flatten_config(layer))
-            elif (type(layer) in [Concatenate]):
+            elif (type(actual_layer) in [Concatenate]):
                 fp.write(gen_concat_config(layer))
-            elif (type(layer) in [Lambda]):
+            elif (type(actual_layer) in [Lambda]):
                 fp.write(gen_lambda_config(layer))
-            elif (type(layer) in [UpSampling2D, UpSampling1D]):
+            elif (type(actual_layer) in [UpSampling2D, UpSampling1D]):
                 fp.write(gen_upsampling_config(layer))
-            elif(is_rnn_layer(layer)):
-                if(type(layer.cell) is SimpleRNNCell):
+            elif(is_rnn_layer(actual_layer)):
+                if(type(actual_layer.cell) is SimpleRNNCell):
                     for w in layer.weights:
                         gen_weight_tensor(w, per_axis=False)
                     fp.write(gen_simple_cell_config(layer, layer_q_list['intermediate_'+layer.name]))
-                elif(type(layer.cell) is GRUCell or 'gru' in layer.cell.name):
+                elif(type(actual_layer.cell) is GRUCell or 'gru' in layer.cell.name):
                     for w in layer.weights:
                         gen_weight_tensor(w, per_axis=False)
                     fp.write(gen_gru_cell_config(layer, layer_q_list['intermediate_'+layer.name]))
-                elif(type(layer.cell) is LSTMCell or 'lstm' in layer.cell.name):
+                elif(type(actual_layer.cell) is LSTMCell or 'lstm' in layer.cell.name):
                     for w in layer.weights:
                         gen_weight_tensor(w, per_axis=False)
                     fp.write(gen_lstm_cell_config(layer, layer_q_list['intermediate_'+layer.name]))
@@ -918,6 +937,9 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
         # inverted order of output, very strange
         output_num = (len(model.output) -1) if type(model.output) is list else 0
         for layer in L:
+            actual_layer = layer
+            if isinstance(layer, tf.keras.layers.Wrapper):
+                actual_layer = layer.layer
             if (is_skipable_layer(layer)):
                 continue
             # FIXME: need a better solution to seperate the input 'tensor' from other layers
@@ -962,7 +984,7 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
             elif ('re_lu' in layer.name):
                 inp = layer_name_from_tensor(layer.input)
                 cfg = layer.get_config()
-                if(cfg['max_value'] is None and cfg['negative_slope'] == 0 and cfg['threshold'] == 0):
+                if 'max_value' not in cfg or (cfg['max_value'] is None and cfg['negative_slope'] == 0 and cfg['threshold'] == 0):
                     fp.write('\tlayer[%s] = model.active(act_relu(), layer[%s]);\n' % (id, LI[inp][0]))
                 else:
                     if(cfg['max_value'] is None):
@@ -1035,7 +1057,7 @@ def generate_model(model, x_test, per_channel_quant=False, name='weights.h', for
                 inp = layer_name_from_tensor(layer.input)
                 fp.write('\tlayer[{0}] = model.hook(softmax_s(&{1}_config), layer[{2}]);\n'.format(id, layer.name, LI[inp][0]))
 
-            elif (is_rnn_layer(layer)):
+            elif (is_rnn_layer(actual_layer)):
                 inp = layer_name_from_tensor(layer.input)
                 line = '\tlayer[{0}] = model.hook(rnn_s(<rnn_cell>, &{1}_config), layer[{2}]);\n'.format(id, layer.name, LI[inp][0])
                 if (type(layer.cell) is SimpleRNNCell):

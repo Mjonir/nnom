@@ -8,7 +8,15 @@
     2020-05-22     Jianjia Ma   The first version
 '''
 from tensorflow.keras.layers import *
+import tensorflow as tf
 import numpy as np
+
+def find_tensor_by_name(layer, name):
+    for tensor in layer.weights:
+        if name in tensor.name:
+            return tensor
+
+    return None
 
 def convert_tensor_name(t):
     return 'tensor_'+t.name.replace('/', '_').replace(':', '_')
@@ -119,6 +127,10 @@ const nnom_tensor_t <tensor_name> = {
     return config
 
 def gen_conv2d_config(layer, output_shifts, bias_shifts):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
+
     c = '''
 const nnom_qformat_param_t <layer_name>_output_shift[] = <output_shift_values>;
 const nnom_qformat_param_t <layer_name>_bias_shift[] = <bias_shift_values>;
@@ -140,19 +152,22 @@ const nnom_conv2d_config_t <layer_name>_config = {
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
     c = c.replace('<qtype>', "NNOM_QTYPE_PER_TENSOR")
-    c = c.replace('<weight>',convert_tensor_name(layer.weights[0]))
-    c = c.replace('<bias>',convert_tensor_name(layer.weights[1]))
+    c = c.replace('<weight>',convert_tensor_name(find_tensor_by_name(layer, 'kernel:')))
+    c = c.replace('<bias>',convert_tensor_name(find_tensor_by_name(layer, 'bias:')))
     c = c.replace('<output_shift_values>', output_shifts)
     c = c.replace('<bias_shift_values>', bias_shifts)
-    c = c.replace('<filter_size>', str(layer.filters) if layer.filters is not None else str(layer.depth_multiplier))  # output channel
-    c = c.replace('<kernel_size>', to_cstyle(layer.kernel_size))
-    c = c.replace('<stride_size>', to_cstyle(layer.strides))
+    c = c.replace('<filter_size>', str(actual_layer.filters) if actual_layer.filters is not None else str(actual_layer.depth_multiplier))  # output channel
+    c = c.replace('<kernel_size>', to_cstyle(actual_layer.kernel_size))
+    c = c.replace('<stride_size>', to_cstyle(actual_layer.strides))
     c = c.replace('<padding_size>', '{0, 0}') # not using it with keras, defined by padding type instead
-    c = c.replace('<dilation_size>', to_cstyle(layer.dilation_rate))
-    c = c.replace('<padding_type>', 'PADDING_'+layer.padding.upper())
+    c = c.replace('<dilation_size>', to_cstyle(actual_layer.dilation_rate))
+    c = c.replace('<padding_type>', 'PADDING_'+actual_layer.padding.upper())
     return c
 
 def gen_conv2d_trans_config(layer, output_shifts, bias_shifts):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_qformat_param_t <layer_name>_output_shift[] = <output_shift_values>;
 const nnom_qformat_param_t <layer_name>_bias_shift[] = <bias_shift_values>;
@@ -174,19 +189,22 @@ const nnom_conv2d_trans_config_t <layer_name>_config = {
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
     c = c.replace('<qtype>', "NNOM_QTYPE_PER_TENSOR")
-    c = c.replace('<weight>',convert_tensor_name(layer.weights[0]))
-    c = c.replace('<bias>',convert_tensor_name(layer.weights[1]))
+    c = c.replace('<weight>',convert_tensor_name(find_tensor_by_name(layer, 'kernel:')))
+    c = c.replace('<bias>',convert_tensor_name(find_tensor_by_name(layer, 'bias:')))
     c = c.replace('<output_shift_values>', output_shifts)
     c = c.replace('<bias_shift_values>', bias_shifts)
-    c = c.replace('<filter_size>', str(layer.filters)) # output channel
-    c = c.replace('<kernel_size>', to_cstyle(layer.kernel_size))
-    c = c.replace('<stride_size>', to_cstyle(layer.strides))
+    c = c.replace('<filter_size>', str(actual_layer.filters)) # output channel
+    c = c.replace('<kernel_size>', to_cstyle(actual_layer.kernel_size))
+    c = c.replace('<stride_size>', to_cstyle(actual_layer.strides))
     c = c.replace('<padding_size>', '{0, 0}') # not using it with keras, defined by padding type instead
-    c = c.replace('<dilation_size>', to_cstyle(layer.dilation_rate))
-    c = c.replace('<padding_type>', 'PADDING_'+layer.padding.upper())
+    c = c.replace('<dilation_size>', to_cstyle(actual_layer.dilation_rate))
+    c = c.replace('<padding_type>', 'PADDING_'+actual_layer.padding.upper())
     return c
 
 def gen_dense_config(layer, output_shifts, bias_shift):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_qformat_param_t <layer_name>_output_shift[] = <output_shift_values>;
 const nnom_qformat_param_t <layer_name>_bias_shift[] = <bias_shift_values>;
@@ -202,8 +220,8 @@ const nnom_dense_config_t <layer_name>_config = {
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
     c = c.replace('<qtype>', "NNOM_QTYPE_PER_TENSOR")
-    c = c.replace('<weight>', convert_tensor_name(layer.weights[0]))
-    c = c.replace('<bias>', convert_tensor_name(layer.weights[1]))
+    c = c.replace('<weight>', convert_tensor_name(find_tensor_by_name(layer, 'kernel:')))
+    c = c.replace('<bias>', convert_tensor_name(find_tensor_by_name(layer, 'bias:')))
     c = c.replace('<output_shift_values>', output_shifts)
     c = c.replace('<bias_shift_values>', bias_shift)
     return c
@@ -255,6 +273,9 @@ const nnom_io_config_t <layer_name>_config = {
 
 
 def gen_pooling_config(layer, output_shifts='0'):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_pool_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -267,10 +288,10 @@ const nnom_pool_config_t <layer_name>_config = {
 '''
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
-    c = c.replace('<padding_type>', 'PADDING_'+layer.padding.upper())
-    c = c.replace('<kernel_size>', to_cstyle(layer.pool_size))
-    c = c.replace('<stride_size>', to_cstyle(layer.strides))
-    c = c.replace('<num_dim>', str(len(layer.pool_size)))
+    c = c.replace('<padding_type>', 'PADDING_'+actual_layer.padding.upper())
+    c = c.replace('<kernel_size>', to_cstyle(actual_layer.pool_size))
+    c = c.replace('<stride_size>', to_cstyle(actual_layer.strides))
+    c = c.replace('<num_dim>', str(len(actual_layer.pool_size)))
     c = c.replace('<output_shift>', output_shifts) # not used at the moment
     return c
 
@@ -301,6 +322,9 @@ const nnom_matrix_config_t <layer_name>_config = {
     return c
 
 def gen_zero_padding_config(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_zero_padding_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -310,13 +334,16 @@ const nnom_zero_padding_config_t <layer_name>_config = {
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
     try:
-        c = c.replace('<padding>', to_cstyle(sum(layer.padding, ())))
+        c = c.replace('<padding>', to_cstyle(sum(actual_layer.padding, ())))
     except:
-        pad = ((0, 0), layer.padding)
+        pad = ((0, 0), actual_layer.padding)
         c = c.replace('<padding>', to_cstyle(sum(pad, ())))
     return c
 
 def gen_cropping_config(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_cropping_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -326,13 +353,16 @@ const nnom_cropping_config_t <layer_name>_config = {
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
     try:
-        c = c.replace('<padding>', to_cstyle(sum(layer.cropping, ()))) #((top_crop, bottom_crop), (left_crop, right_crop))
+        c = c.replace('<padding>', to_cstyle(sum(actual_layer.cropping, ()))) #((top_crop, bottom_crop), (left_crop, right_crop))
     except:
-        pad = ((0, 0), layer.cropping)
+        pad = ((0, 0), actual_layer.cropping)
         c = c.replace('<padding>', to_cstyle(sum(pad, ())))
     return c
 
 def gen_upsampling_config(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_upsample_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -341,7 +371,7 @@ const nnom_upsample_config_t <layer_name>_config = {
 '''
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
-    c = c.replace('<kernel>', to_cstyle(layer.size))
+    c = c.replace('<kernel>', to_cstyle(actual_layer.size))
     return c
 
 def gen_softmax_config(layer):
@@ -365,6 +395,9 @@ const nnom_flatten_config_t <layer_name>_config = {
     return c
 
 def gen_concat_config(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_concat_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -373,7 +406,7 @@ const nnom_concat_config_t <layer_name>_config = {
 '''
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
-    c = c.replace('<axis>', str(layer.axis))
+    c = c.replace('<axis>', str(actual_layer.axis))
     return c
 
 def gen_lambda_config(layer, run_func_name='NULL', build_func_name='NULL', free_func_name='NULL', parameters_name='NULL'):
@@ -395,6 +428,9 @@ const nnom_lambda_config_t <layer_name>_config = {
     return c
 
 def gen_rnn_config(layer):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_rnn_config_t <layer_name>_config = {
     .super = <base_config>,
@@ -405,12 +441,15 @@ const nnom_rnn_config_t <layer_name>_config = {
 '''
     c = c.replace('<layer_name>', layer.name)
     c = c.replace('<base_config>', gen_base_config(layer))
-    c = c.replace('<stateful>', 'true' if layer.stateful else 'false')
-    c = c.replace('<go_backwards>', 'true' if layer.go_backwards else 'false')
-    c = c.replace('<return_sequence>', 'true' if layer.return_sequences else 'false')
+    c = c.replace('<stateful>', 'true' if actual_layer.stateful else 'false')
+    c = c.replace('<go_backwards>', 'true' if actual_layer.go_backwards else 'false')
+    c = c.replace('<return_sequence>', 'true' if actual_layer.return_sequences else 'false')
     return c
 
 def gen_simple_cell_config(layer, q_list):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_simple_cell_config_t <layer_name>_simple_cell_config = {
     .super = <base_config>,
@@ -441,6 +480,9 @@ const nnom_simple_cell_config_t <layer_name>_simple_cell_config = {
     return c
 
 def gen_lstm_cell_config(layer, q_list):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_lstm_cell_config_t <layer_name>_lstm_cell_config = {
     .super = <base_config>,
@@ -471,6 +513,9 @@ const nnom_lstm_cell_config_t <layer_name>_lstm_cell_config = {
 
 
 def gen_gru_cell_config(layer, q_list):
+    actual_layer = layer
+    if isinstance(layer, tf.keras.layers.Wrapper):
+        actual_layer = layer.layer
     c = '''
 const nnom_gru_cell_config_t <layer_name>_gru_cell_config = {
     .super = <base_config>,
