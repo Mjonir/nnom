@@ -589,6 +589,16 @@ def quantize_output(model, x_test, quantize_method='max_min', layer_offset=False
 def layer_name_from_tensor(t):
     return t.name.replace(':','/').split('/')[0]
 
+def move_kernel_weights_to_front(weights):
+    front = []
+    back = []
+    for w in weights:
+        if 'kernel' in w.name:
+            front.append(w)
+        else:
+            back.append(w)
+
+    return front + back
 
 def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=True, layer_q_list=None):
     # Quantize weights to 8-bits using (min,max) and write to file
@@ -615,10 +625,10 @@ def quantize_weights(model, name='weights.h', format='hwc', per_channel_quant=Tr
         # generate weights and bias now
         weight_dec_shift = 0
         print('quantizing weights for layer', layer.name)
-        layer_weights = layer.get_weights()
-        for idx, var in enumerate(layer_weights):
-            var_name = convert_tensor_name(layer.weights[idx])
-            var_values = var
+        
+        for var in move_kernel_weights_to_front(layer.trainable_weights):
+            var_name = convert_tensor_name(var)
+            var_values = var.numpy()
             if(("kernel" not in var_name and 'bias' not in var_name) or # ignore batchnormalisation's parameters
                ('kernel_min' in var_name or 'kernel_max' in var_name)): # ignore QuantizeWrapper parameters
                 continue
